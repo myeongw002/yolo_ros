@@ -156,6 +156,14 @@ def generate_launch_description():
             description="Specific reliability QoS of the input image topic (0=system default, 1=Reliable, 2=Best Effort)",
         )
 
+        image_transport_mode = LaunchConfiguration("image_transport_mode")
+        image_transport_mode_cmd = DeclareLaunchArgument(
+            "image_transport_mode",
+            default_value="auto",
+            choices=["raw", "compressed", "auto"],
+            description="Input image transport type: raw, compressed, or auto",
+        )
+
         input_depth_topic = LaunchConfiguration("input_depth_topic")
         input_depth_topic_cmd = DeclareLaunchArgument(
             "input_depth_topic",
@@ -256,6 +264,7 @@ def generate_launch_description():
                     "agnostic_nms": agnostic_nms,
                     "retina_masks": retina_masks,
                     "image_reliability": image_reliability,
+                    "image_transport_mode": image_transport_mode,
                 }
             ],
             remappings=[("image_raw", input_image_topic)],
@@ -266,7 +275,13 @@ def generate_launch_description():
             executable="tracking_node",
             name="tracking_node",
             namespace=namespace,
-            parameters=[{"tracker": tracker, "image_reliability": image_reliability}],
+            parameters=[
+                {
+                    "tracker": tracker,
+                    "image_reliability": image_reliability,
+                    "image_transport_mode": image_transport_mode,
+                }
+            ],
             remappings=[("image_raw", input_image_topic)],
             condition=IfCondition(PythonExpression([str(use_tracking)])),
         )
@@ -298,7 +313,12 @@ def generate_launch_description():
             executable="debug_node",
             name="debug_node",
             namespace=namespace,
-            parameters=[{"image_reliability": image_reliability}],
+            parameters=[
+                {
+                    "image_reliability": image_reliability,
+                    "image_transport_mode": image_transport_mode,
+                }
+            ],
             remappings=[
                 ("image_raw", input_image_topic),
                 ("detections", debug_detections_topic),
@@ -325,6 +345,7 @@ def generate_launch_description():
             retina_masks_cmd,
             input_image_topic_cmd,
             image_reliability_cmd,
+            image_transport_mode_cmd,
             input_depth_topic_cmd,
             depth_image_reliability_cmd,
             input_depth_info_topic_cmd,
