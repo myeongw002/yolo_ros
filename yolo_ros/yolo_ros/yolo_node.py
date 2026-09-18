@@ -34,6 +34,7 @@ from ultralytics.engine.results import Masks
 from ultralytics.engine.results import Keypoints
 
 from std_srvs.srv import SetBool
+from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import Image
 from yolo_msgs.msg import Point2D
 from yolo_msgs.msg import BoundingBox2D
@@ -70,6 +71,7 @@ class YoloNode(LifecycleNode):
         self.declare_parameter("yolo_encoding", "bgr8")
         self.declare_parameter("enable", True)
         self.declare_parameter("image_reliability", QoSReliabilityPolicy.BEST_EFFORT)
+        self.declare_parameter("image_transport_mode", "auto")
 
         self.declare_parameter("threshold", 0.5)
         self.declare_parameter("iou", 0.5)
@@ -133,6 +135,16 @@ class YoloNode(LifecycleNode):
         self.reliability = (
             self.get_parameter("image_reliability").get_parameter_value().integer_value
         )
+        self.image_transport_mode = (
+            self.get_parameter("image_transport_mode")
+            .get_parameter_value()
+            .string_value.lower()
+        )
+        if self.image_transport_mode not in ("raw", "compressed", "auto"):
+            self.get_logger().error(
+                "image_transport_mode must be one of: raw, compressed, auto"
+            )
+            return TransitionCallbackReturn.ERROR
 
         # Detection pub
         self.image_qos_profile = QoSProfile(
@@ -186,8 +198,14 @@ class YoloNode(LifecycleNode):
                 SetClasses, "set_classes", self.set_classes_cb
             )
 
+        image_transport_mode = self._resolve_image_transport_mode()
+        image_type = CompressedImage if image_transport_mode == "compressed" else Image
+        self._active_image_transport_mode = image_transport_mode
         self._sub = self.create_subscription(
-            Image, "image_raw", self.image_cb, self.image_qos_profile
+            image_type, "image_raw", self.image_cb, self.image_qos_profile
+        )
+        self.get_logger().info(
+            f"[{self.get_name()}] Image transport: {image_transport_mode}"
         )
 
         super().on_activate(state)
@@ -421,7 +439,44 @@ class YoloNode(LifecycleNode):
 
         return keypoints_list
 
-    def image_cb(self, msg: Image) -> None:
+    def _resolve_image_transport_mode(self) -> str:
+        """Resolve raw/compressed input mode, using the ROS graph in auto mode."""
+        if self.image_transport_mode != "auto":
+            return self.image_transport_mode
+
+        try:
+            resolved_topic = self.resolve_topic_name("image_raw")
+            for topic_name, topic_types in self.get_topic_names_and_types():
+                if topic_name != resolved_topic:
+                    continue
+                if "sensor_msgs/msg/CompressedImage" in topic_types:
+                    return "compressed"
+                if "sensor_msgs/msg/Image" in topic_types:
+                    return "raw"
+
+            if resolved_topic.endswith("/compressed"):
+                return "compressed"
+        except Exception as error:
+            self.get_logger().warn(
+                f"Could not inspect image topic type in auto mode: {error}"
+            )
+
+        self.get_logger().warn(
+            "Could not determine image type in auto mode; falling back to raw. "
+            "Set image_transport_mode:=compressed when the publisher starts later."
+        )
+        return "raw"
+
+    def _image_to_cv2(self, msg):
+        if isinstance(msg, CompressedImage):
+            return self.cv_bridge.compressed_imgmsg_to_cv2(
+                msg, desired_encoding=self.yolo_encoding
+            )
+        return self.cv_bridge.imgmsg_to_cv2(
+            msg, desired_encoding=self.yolo_encoding
+        )
+
+    def image_cb(self, msg) -> None:
         """
         Image callback for processing detections.
 
@@ -432,9 +487,7 @@ class YoloNode(LifecycleNode):
         if self.enable:
 
             # Convert image + predict
-            cv_image = self.cv_bridge.imgmsg_to_cv2(
-                msg, desired_encoding=self.yolo_encoding
-            )
+            cv_image = self._image_to_cv2(msg)
             results = self.yolo.predict(
                 source=cv_image,
                 verbose=False,
