@@ -149,6 +149,18 @@ The compatible models for yolo_ros are the following:
 - [YOLOE](https://docs.ultralytics.com/models/yoloe/)
 - [YOLOv26](https://docs.ultralytics.com/models/yolo26/)
 
+## Compressed image input
+
+The YOLO, tracking, and debug nodes can consume `sensor_msgs/msg/CompressedImage` directly.
+
+```shell
+ros2 launch yolo_bringup yolov11.launch.py \
+  input_image_topic:=/camera/camera/color/image_raw/compressed \
+  image_transport_mode:=compressed
+```
+
+`image_transport_mode:=auto` inspects the discovered topic type and also recognizes the conventional `/compressed` suffix. If the compressed publisher starts after YOLO and the topic name does not end in `/compressed`, select `compressed` explicitly.
+
 ## Usage
 
 <details>
@@ -242,6 +254,7 @@ These are the parameters from the [yolo.launch.py](./yolo_bringup/launch/yolo.la
 - **retina_masks**: Whether to use high-resolution segmentation masks if available in the model, enhancing mask quality for segmentation (default: False)
 - **input_image_topic**: Camera topic of RGB images (default: /camera/rgb/image_raw)
 - **image_reliability**: Reliability for the image topic: 0=system default, 1=Reliable, 2=Best Effort (default: 1)
+- **image_transport_mode**: Input image message type: raw (`sensor_msgs/Image`), compressed (`sensor_msgs/CompressedImage`), or auto (default: auto)
 - **input_depth_topic**: Camera topic of depth images (default: /camera/depth/image_raw)
 - **depth_image_reliability**: Reliability for the depth image topic: 0=system default, 1=Reliable, 2=Best Effort (default: 1)
 - **input_depth_info_topic**: Camera topic for info data (default: /camera/depth/camera_info)
