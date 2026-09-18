@@ -33,6 +33,7 @@ import message_filters
 from cv_bridge import CvBridge
 from ultralytics.utils.plotting import Annotator, colors
 
+from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
@@ -64,6 +65,7 @@ class DebugNode(LifecycleNode):
 
         # Params
         self.declare_parameter("image_reliability", QoSReliabilityPolicy.BEST_EFFORT)
+        self.declare_parameter("image_transport_mode", "auto")
 
     def on_configure(self, state: LifecycleState) -> TransitionCallbackReturn:
         """
@@ -84,6 +86,16 @@ class DebugNode(LifecycleNode):
             durability=QoSDurabilityPolicy.VOLATILE,
             depth=1,
         )
+        self.image_transport_mode = (
+            self.get_parameter("image_transport_mode")
+            .get_parameter_value()
+            .string_value.lower()
+        )
+        if self.image_transport_mode not in ("raw", "compressed", "auto"):
+            self.get_logger().error(
+                "image_transport_mode must be one of: raw, compressed, auto"
+            )
+            return TransitionCallbackReturn.ERROR
 
         # Pubs
         self._dbg_pub = self.create_publisher(Image, "dbg_image", 10)
@@ -107,8 +119,14 @@ class DebugNode(LifecycleNode):
         self.get_logger().info(f"[{self.get_name()}] Activating...")
 
         # Subs
+        image_transport_mode = self._resolve_image_transport_mode()
+        image_type = CompressedImage if image_transport_mode == "compressed" else Image
+        self._active_image_transport_mode = image_transport_mode
         self.image_sub = message_filters.Subscriber(
-            self, Image, "image_raw", qos_profile=self.image_qos_profile
+            self, image_type, "image_raw", qos_profile=self.image_qos_profile
+        )
+        self.get_logger().info(
+            f"[{self.get_name()}] Image transport: {image_transport_mode}"
         )
         self.detections_sub = message_filters.Subscriber(
             self, DetectionArray, "detections", qos_profile=10
@@ -419,7 +437,42 @@ class DebugNode(LifecycleNode):
 
         return marker
 
-    def detections_cb(self, img_msg: Image, detection_msg: DetectionArray) -> None:
+    def _resolve_image_transport_mode(self) -> str:
+        """Resolve raw/compressed input mode, using the ROS graph in auto mode."""
+        if self.image_transport_mode != "auto":
+            return self.image_transport_mode
+
+        try:
+            resolved_topic = self.resolve_topic_name("image_raw")
+            for topic_name, topic_types in self.get_topic_names_and_types():
+                if topic_name != resolved_topic:
+                    continue
+                if "sensor_msgs/msg/CompressedImage" in topic_types:
+                    return "compressed"
+                if "sensor_msgs/msg/Image" in topic_types:
+                    return "raw"
+
+            if resolved_topic.endswith("/compressed"):
+                return "compressed"
+        except Exception as error:
+            self.get_logger().warn(
+                f"Could not inspect image topic type in auto mode: {error}"
+            )
+
+        self.get_logger().warn(
+            "Could not determine image type in auto mode; falling back to raw. "
+            "Set image_transport_mode:=compressed when the publisher starts later."
+        )
+        return "raw"
+
+    def _image_to_cv2(self, msg):
+        if isinstance(msg, CompressedImage):
+            return self.cv_bridge.compressed_imgmsg_to_cv2(
+                msg, desired_encoding="bgr8"
+            )
+        return self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+
+    def detections_cb(self, img_msg, detection_msg: DetectionArray) -> None:
         """
         Process synchronized image and detections messages.
 
@@ -429,7 +482,7 @@ class DebugNode(LifecycleNode):
         @param img_msg Image message
         @param detection_msg Detections message
         """
-        cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg, desired_encoding="bgr8")
+        cv_image = self._image_to_cv2(img_msg)
         bb_marker_array = MarkerArray()
         kp_marker_array = MarkerArray()
 
