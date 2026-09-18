@@ -34,6 +34,7 @@ from ultralytics.trackers import BOTSORT, BYTETracker
 from ultralytics.utils import IterableSimpleNamespace, YAML
 from ultralytics.utils.checks import check_requirements, check_yaml
 
+from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import Image
 from yolo_msgs.msg import Detection
 from yolo_msgs.msg import DetectionArray
@@ -58,6 +59,7 @@ class TrackingNode(LifecycleNode):
         # Params
         self.declare_parameter("tracker", "bytetrack.yaml")
         self.declare_parameter("image_reliability", QoSReliabilityPolicy.BEST_EFFORT)
+        self.declare_parameter("image_transport_mode", "auto")
 
         self.cv_bridge = CvBridge()
 
@@ -77,6 +79,16 @@ class TrackingNode(LifecycleNode):
         self.image_reliability = (
             self.get_parameter("image_reliability").get_parameter_value().integer_value
         )
+        self.image_transport_mode = (
+            self.get_parameter("image_transport_mode")
+            .get_parameter_value()
+            .string_value.lower()
+        )
+        if self.image_transport_mode not in ("raw", "compressed", "auto"):
+            self.get_logger().error(
+                "image_transport_mode must be one of: raw, compressed, auto"
+            )
+            return TransitionCallbackReturn.ERROR
 
         self.tracker = self.create_tracker(tracker_name)
         self._pub = self.create_publisher(DetectionArray, "tracking", 10)
@@ -105,8 +117,14 @@ class TrackingNode(LifecycleNode):
         )
 
         # Subs
+        image_transport_mode = self._resolve_image_transport_mode()
+        image_type = CompressedImage if image_transport_mode == "compressed" else Image
+        self._active_image_transport_mode = image_transport_mode
         self.image_sub = message_filters.Subscriber(
-            self, Image, "image_raw", qos_profile=image_qos_profile
+            self, image_type, "image_raw", qos_profile=image_qos_profile
+        )
+        self.get_logger().info(
+            f"[{self.get_name()}] Image transport: {image_transport_mode}"
         )
         self.detections_sub = message_filters.Subscriber(
             self, DetectionArray, "detections", qos_profile=10
@@ -208,7 +226,42 @@ class TrackingNode(LifecycleNode):
 
         return tracker
 
-    def detections_cb(self, img_msg: Image, detections_msg: DetectionArray) -> None:
+    def _resolve_image_transport_mode(self) -> str:
+        """Resolve raw/compressed input mode, using the ROS graph in auto mode."""
+        if self.image_transport_mode != "auto":
+            return self.image_transport_mode
+
+        try:
+            resolved_topic = self.resolve_topic_name("image_raw")
+            for topic_name, topic_types in self.get_topic_names_and_types():
+                if topic_name != resolved_topic:
+                    continue
+                if "sensor_msgs/msg/CompressedImage" in topic_types:
+                    return "compressed"
+                if "sensor_msgs/msg/Image" in topic_types:
+                    return "raw"
+
+            if resolved_topic.endswith("/compressed"):
+                return "compressed"
+        except Exception as error:
+            self.get_logger().warn(
+                f"Could not inspect image topic type in auto mode: {error}"
+            )
+
+        self.get_logger().warn(
+            "Could not determine image type in auto mode; falling back to raw. "
+            "Set image_transport_mode:=compressed when the publisher starts later."
+        )
+        return "raw"
+
+    def _image_to_cv2(self, msg):
+        if isinstance(msg, CompressedImage):
+            return self.cv_bridge.compressed_imgmsg_to_cv2(
+                msg, desired_encoding="bgr8"
+            )
+        return self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+
+    def detections_cb(self, img_msg, detections_msg: DetectionArray) -> None:
         """
         Process synchronized image and detections messages.
 
@@ -221,7 +274,8 @@ class TrackingNode(LifecycleNode):
         tracked_detections_msg.header = img_msg.header
 
         # Convert image
-        cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg, desired_encoding="bgr8")
+        cv_image = self._image_to_cv2(img_msg)
+        image_shape = (cv_image.shape[0], cv_image.shape[1])
         cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
 
         # Parse detections
@@ -243,14 +297,14 @@ class TrackingNode(LifecycleNode):
         # Tracking
         if len(detection_list) > 0:
 
-            det = Boxes(np.array(detection_list), (img_msg.height, img_msg.width))
+            det = Boxes(np.array(detection_list), image_shape)
             tracks = self.tracker.update(det, cv_image)
 
             if len(tracks) > 0:
 
                 for t in tracks:
 
-                    tracked_box = Boxes(t[:-1], (img_msg.height, img_msg.width))
+                    tracked_box = Boxes(t[:-1], image_shape)
                     tracked_detection: Detection = detections_msg.detections[int(t[-1])]
 
                     # Get boxes values
